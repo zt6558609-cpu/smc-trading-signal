@@ -1,37 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-SMC 交易信号监控 - 核心脚本 v2（生产版）
+SMC 交易信号监控 - 生产版 v2
+数据源：新浪财经/雅虎财经（免费接口）
 策略：1H 定方向 + 15M 入场 + ATR 动态止盈止损
-数据源：新浪财经 / 雅虎财经（免费接口）
 """
-
-# 使用 v2 版本
-import sys
-from pathlib import Path
-
-# 重定向到 v2
-v2_script = Path(__file__).parent / "monitor_v2.py"
-if v2_script.exists():
-    with open(v2_script, "r", encoding="utf-8") as f:
-        exec(f.read())
-else:
-    print("错误：monitor_v2.py 不存在")
-    sys.exit(1)
 
 import json
 import os
 import sys
+import requests
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
-
-# 尝试导入 akshare
-try:
-    import akshare as ak
-    AKSHARE_AVAILABLE = True
-except ImportError:
-    AKSHARE_AVAILABLE = False
-    print("⚠️ akshare 未安装，使用模拟数据测试模式")
 
 SCRIPT_DIR = Path(__file__).parent
 CONFIG_DIR = SCRIPT_DIR.parent / "config"
@@ -44,33 +25,109 @@ def load_config():
             return json.load(f)
     return {
         "symbols": [
-            {"name": "黄金", "code": "GC", "source": "akshare", "enabled": True}
+            {"name": "黄金", "code": "GC", "source": "sina", "enabled": True}
         ]
     }
 
-def get_gold_price_akshare():
-    """获取 COMEX 黄金价格（AkShare）"""
+def get_gold_price_sina():
+    """
+    获取 COMEX 黄金价格（新浪财经）
+    接口：https://hq.sinajs.cn/list=hf_GC
+    """
     try:
-        df = ak.futures_foreign_commodity_realtime(symbol='GC')
-        if len(df) > 0:
-            row = df.iloc[0]
-            return {
-                "price": float(row['最新价']),
-                "change": float(row['涨跌额']),
-                "change_pct": float(row['涨跌幅']),
-                "high": float(row['最高价']),
-                "low": float(row['最低价']),
-                "open": float(row['开盘价']),
-                "prev_close": float(row['昨日结算价']),
-                "volume": float(row['成交量']) if '成交量' in row else 0,
-                "time": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            }
+        # 新浪财经期货接口（HTTPS）
+        url = "https://hq.sinajs.cn/list=hf_GC"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Referer": "https://futures.sina.com.cn/"
+        }
+        
+        response = requests.get(url, headers=headers, timeout=10, verify=False)
+        
+        if response.status_code == 200:
+            # 解析返回：var hq_str_hf_GC="COMEX 黄金，2156.80,..."
+            content = response.text.strip()
+            if "=" in content and '","' in content:
+                data_part = content.split('="', 1)[1].strip('"')
+                fields = data_part.split(",")
+                
+                if len(fields) >= 10 and fields[1]:
+                    try:
+                        price = float(fields[1])
+                        if price > 0:
+                            change = float(fields[2]) if fields[2] else 0
+                            change_pct = (change / price * 100) if price > 0 else 0
+                            high = float(fields[4]) if fields[4] else price
+                            low = float(fields[5]) if fields[5] else price
+                            open_price = float(fields[3]) if fields[3] else price
+                            prev_close = float(fields[10]) if fields[10] else price
+                            
+                            return {
+                                "price": price,
+                                "change": change,
+                                "change_pct": change_pct,
+                                "high": high,
+                                "low": low,
+                                "open": open_price,
+                                "prev_close": prev_close,
+                                "volume": 0,
+                                "time": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                                "source": "新浪财经"
+                            }
+                    except (ValueError, IndexError):
+                        pass
     except Exception as e:
-        print(f"获取金价失败：{e}")
+        print(f"  新浪财经接口失败：{e}")
+    
+    return None
+
+def get_gold_price_yahoo():
+    """
+    获取 COMEX 黄金价格（雅虎财经）
+    接口：https://query1.finance.yahoo.com/v8/finance/chart/GC=F
+    """
+    try:
+        url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        }
+        
+        response = requests.get(url, headers=headers, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            if data.get('chart') and data['chart'].get('result'):
+                result = data['chart']['result'][0]
+                meta = result['meta']
+                quote = result.get('indicators', {}).get('quote', [{}])[0]
+                
+                price = quote.get('close', [meta.get('regularMarketPrice', 0)])[-1]
+                high = quote.get('high', [0])[-1]
+                low = quote.get('low', [0])[-1]
+                open_price = quote.get('open', [0])[-1]
+                prev_close = meta.get('previousClose', price)
+                change = price - prev_close
+                change_pct = (change / prev_close * 100) if prev_close > 0 else 0
+                
+                return {
+                    "price": price,
+                    "change": change,
+                    "change_pct": change_pct,
+                    "high": high,
+                    "low": low,
+                    "open": open_price,
+                    "prev_close": prev_close,
+                    "volume": quote.get('volume', [0])[-1],
+                    "time": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    "source": "雅虎财经"
+                }
+    except Exception as e:
+        print(f"  雅虎财经接口失败：{e}")
+    
     return None
 
 def get_gold_price_mock():
-    """模拟黄金价格（测试用）"""
+    """模拟黄金价格（测试/备用）"""
     import random
     base_price = 2156.80
     change = random.uniform(-20, 20)
@@ -83,51 +140,53 @@ def get_gold_price_mock():
         "open": base_price + random.uniform(-5, 5),
         "prev_close": base_price,
         "volume": random.uniform(10000, 50000),
-        "time": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        "time": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        "source": "模拟数据"
     }
 
+def get_gold_price(symbol_source="sina"):
+    """获取黄金价格（多源切换）"""
+    # 尝试新浪财经
+    if symbol_source != "mock":
+        price = get_gold_price_sina()
+        if price:
+            return price
+        
+        # 新浪财经失败，尝试雅虎财经
+        price = get_gold_price_yahoo()
+        if price:
+            return price
+    
+    # 都失败，使用模拟数据
+    print("  ⚠️ 使用模拟数据（测试模式）")
+    return get_gold_price_mock()
+
 def calculate_atr(high, low, close, period=14):
-    """
-    计算 ATR（平均真实波幅）
-    简化版：使用当前 K 线的高低点差
-    """
-    # 实际应该用 N 周期的 TR 平均值
-    # 这里简化为当前 K 线波动
+    """计算 ATR（简化版）"""
     tr = high - low
-    
-    # ATR 限制范围（避免极端情况）
     if tr < 10:
-        tr = 10  # 最小 10 美元
+        tr = 10
     if tr > 80:
-        tr = 80  # 最大 80 美元
-    
+        tr = 80
     return tr
 
 def analyze_trend(price_data):
-    """
-    分析 1H 趋势
-    简化版：根据价格和涨跌判断
-    """
+    """分析 1H 趋势"""
     change_pct = price_data.get('change_pct', 0)
     
-    # 简化趋势判断
     if change_pct > 0.5:
         return "BULLISH", "偏多"
     elif change_pct < -0.5:
         return "BEARISH", "偏空"
     else:
         return "NEUTRAL", "震荡"
-    
+
 def detect_signals(price_data, trend):
-    """
-    检测 SMC 信号
-    """
+    """检测 SMC 信号"""
     signals = []
-    
     change_pct = price_data.get('change_pct', 0)
-    volume = price_data.get('volume', 0)
     
-    # IFC 机构蜡烛检测
+    # IFC 机构蜡烛
     if abs(change_pct) > 0.8:
         signal_type = "IFC 机构蜡烛"
         direction = "BULLISH" if change_pct > 0 else "BEARISH"
@@ -138,7 +197,7 @@ def detect_signals(price_data, trend):
             "description": f"15M 大{'阳' if change_pct > 0 else '阴'}线，涨跌幅 {change_pct:.2f}%"
         })
     
-    # SSL 流动性扫损检测（简化）
+    # SSL/BSL 流动性扫损
     high = price_data.get('high', 0)
     low = price_data.get('low', 0)
     prev_close = price_data.get('prev_close', 0)
@@ -162,25 +221,20 @@ def detect_signals(price_data, trend):
     return signals
 
 def calculate_trade_plan(price_data, trend, signals):
-    """
-    计算交易计划
-    1H 定方向 + 15M 入场 + ATR 止盈止损
-    """
+    """计算交易计划"""
     price = price_data['price']
     high = price_data['high']
     low = price_data['low']
     
-    # 计算 ATR（15 分钟）
     atr = calculate_atr(high, low, price)
     
-    # 确定交易方向（跟随 1H 趋势）
     if "BULLISH" in trend:
         direction = "做多"
         entry = price
-        stop_loss = price - atr * 1.0  # 1 倍 ATR 止损
-        tp1 = price + atr * 1.5  # 1:1.5
-        tp2 = price + atr * 3.0  # 1:3.0
-        tp3 = price + atr * 5.0  # 1:5.0
+        stop_loss = price - atr * 1.0
+        tp1 = price + atr * 1.5
+        tp2 = price + atr * 3.0
+        tp3 = price + atr * 5.0
     elif "BEARISH" in trend:
         direction = "做空"
         entry = price
@@ -189,9 +243,8 @@ def calculate_trade_plan(price_data, trend, signals):
         tp2 = price - atr * 3.0
         tp3 = price - atr * 5.0
     else:
-        return None  # 震荡市不交易
+        return None
     
-    # 风险回报比
     risk = abs(entry - stop_loss)
     reward_1 = abs(tp1 - entry)
     rr_ratio = reward_1 / risk if risk > 0 else 0
@@ -212,6 +265,7 @@ def generate_signal_message(symbol, price_data, trend, signals, trade_plan):
     msg = []
     msg.append(f"📈 SMC 交易信号 - {symbol}")
     msg.append(f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    msg.append(f"📊 数据来源：{price_data.get('source', '未知')}")
     msg.append("")
     
     msg.append("【趋势分析】")
@@ -250,23 +304,22 @@ def generate_signal_message(symbol, price_data, trend, signals, trade_plan):
     return "\n".join(msg)
 
 def check_signal(symbol_config):
-    """检查单个品种的 sinyal"""
+    """检查单个品种的信号"""
     symbol_name = symbol_config['name']
     symbol_code = symbol_config['code']
+    symbol_source = symbol_config.get('source', 'sina')
     
     print(f"正在检查 {symbol_name} ({symbol_code})...")
     
     # 获取价格
-    if AKSHARE_AVAILABLE and symbol_config.get('source') == 'akshare':
-        price_data = get_gold_price_akshare()
-    else:
-        price_data = get_gold_price_mock()
+    price_data = get_gold_price(symbol_source)
     
     if not price_data:
         print(f"  ❌ 获取价格失败")
         return None
     
     print(f"  当前价格：{price_data['price']:.2f} ({price_data['change_pct']:+.2f}%)")
+    print(f"  数据来源：{price_data.get('source', '未知')}")
     
     # 分析趋势
     trend_code, trend_cn = analyze_trend(price_data)
@@ -295,9 +348,9 @@ def check_signal(symbol_config):
 
 def main():
     """主函数"""
-    print("🚀 SMC 交易信号监控 v1")
+    print("🚀 SMC 交易信号监控 v2（生产版）")
     print(f"时间：{datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    print(f"AkShare: {'✅ 已安装' if AKSHARE_AVAILABLE else '❌ 未安装（测试模式）'}")
+    print(f"数据源：新浪财经 / 雅虎财经")
     print("")
     
     # 加载配置

@@ -142,10 +142,25 @@ openclaw cron add smc-trading-signal --interval 60
 
 | 品种 | 代码 | 数据源 | 状态 |
 |------|------|--------|------|
-| 黄金 (COMEX) | GC | AkShare | ✅ 已支持 |
+| 黄金 (COMEX) | GC | 新浪财经/雅虎 | ✅ 已支持 |
 | 比特币 | BTCUSDT | Binance | ⏳ 开发中 |
 | 以太坊 | ETHUSDT | Binance | ⏳ 开发中 |
 | 欧元/美元 | EURUSD | 外汇 API | 📅 计划 |
+
+### ⚠️ 数据源说明
+
+**中国大陆用户**:
+- 新浪财经接口可能不稳定
+- 建议使用 VPN 或代理
+- 或使用模拟数据测试
+
+**海外用户**:
+- 雅虎财经接口稳定
+- 无需额外配置
+
+**生产环境建议**:
+- 使用付费 API（如 Alpha Vantage、Twelve Data）
+- 或自建数据源（AkShare + 本地缓存）
 
 ## 🎓 SMC 术语
 
